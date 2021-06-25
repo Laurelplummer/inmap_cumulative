@@ -1,0 +1,295 @@
+---
+title: "BG Cumulative Emissions"
+author: "Laurel Plummer"
+date: "6/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+---
+title: "BG Cumulative Emissions"
+author: "Laurel Plummer"
+date: "6/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#### Connecting Block Group Mean Centers of Population to DAC Status and ACS Data
+#Built by: Lauren O'Neal, Last updated on: 8/22/2019
+
+# Libraries and Working Directory ----------------------------------------------------------------------------------------------------------------------------------------------------------------
+library(sf)
+library(rgdal)
+library(tidyverse)
+library(readxl)
+
+###File path location for data inputs and outputs
+setwd("U:/CEERB/CHEIS/AB32_Analysis/Data/Cap_and_Trade_Analysis/")
+
+
+# Read in data ----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+#List of SB535 DACs from CARS
+dacs <- read_excel("OEHHA_DATA/SB535DACs_CES3_2018update.xlsx", "SB535 list (2018 update)")
+
+#BG mean centers of population from txt file available through the Census online https://www.census.gov/geographies/reference-files/2010/geo/2010-centers-population.html
+BG_popwt <- read.delim("Census/CenPop2010_Mean_BG06.txt", header = TRUE, sep = ",", dec = ".", colClasses = "character")
+
+#Output from "U:/CEERB/CHEIS/AB32_Analysis/Data/Cap_and_Trade_Analysis/R Scripts/6_Population_ACS_BG.R"
+#This is the block group file created from ACS API script
+#We are not using the spatial file because we are just joining the data to the location of the centroids
+acs_bg <- read.csv("Population_Data/BG_ACS_data_2019-05-31.csv", colClasses = "character")
+
+#Turn all of the numbers into the numeric format, but keep GEOID as a character
+acs_bg[, 3:36] <- sapply(acs_bg[, 3:36], as.numeric)
+
+# Label mean pop centers as DACs ----------------------------------------------------------------------------------------------------------------------------------------------------
+
+#Create census tract GEOID for bg mean center of pop
+BG_popwt$GEOID <- paste(BG_popwt$STATEFP, BG_popwt$COUNTYFP, BG_popwt$TRACTCE, BG_popwt$BLKGRPCE, sep="")
+BG_popwt$GEOID_ct <- substr(BG_popwt$GEOID, 2, 11) #purposely cut off the leading zero for this GEOID_ct because the CES GEOIDs do not have the leading zero
+
+#Create census tract GEOID dataframe for DACs
+dac_geoid <- data.frame(dacs$`Census Tract`)
+dac_geoid <- dac_geoid %>% 
+  rename(GEOID_ct = dacs..Census.Tract.)
+dac_geoid$GEOID_ct <- as.character(dac_geoid$GEOID_ct)
+dac_geoid$DAC <- 1
+
+#The centroids in DAC census tracts have DAC = 1
+BG_popwt <- left_join(BG_popwt, dac_geoid, "GEOID_ct")
+
+#DAC should be 0 for those centroids not in DAC census tracts
+BG_popwt$DAC <- ifelse(is.na(BG_popwt$DAC), 0, 1)
+
+#Clean out unnecessary columns
+BG_popwt <- subset(BG_popwt, select = -c(POPULATION, GEOID_ct)) #remove the pop column because this is associated with the 2010 census, and we will use the 2017 census info
+
+# Join the centroids with the ACS data -------------------------------------------------------------------------------------------------------------------------------------------
+
+BG_popwt <- left_join(BG_popwt, acs_bg, "GEOID")
+
+#Rename for easier GIS use
+BG_popwt <- BG_popwt %>% 
+  rename(lat = LATITUDE) %>%
+  rename(long = LONGITUDE)
+
+# Filter out the block groups with no population ------------------------------------------------------------------------------------------------------------------------------
+
+#Block groups coded as 0 are bodies of water, so we are removing these
+BG_popwt <- subset(BG_popwt, BLKGRPCE != 0) #23212 to 23190 - remove 22 block groups
+
+#Remove the block groups with no population as of the 2017 census
+BG_popwt <- subset(BG_popwt, pop_total > 0) #23190 to 23136 - remove 54 block groups
+
+#Export -------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+export_date <- Sys.Date()
+
+#Updated BG csv
+export_BG_path <- paste("R_output/BG_PopCent_DAC_ACS_",export_date,".csv", sep = "")
+write.csv(BG_popwt, file=export_BG_path, row.names=FALSE)
+
+#Export shapefile
+BG_popwt$long <- as.numeric(BG_popwt$long)
+BG_popwt$lat <- as.numeric(BG_popwt$lat)
+
+BG_popwt_spatial <- SpatialPointsDataFrame(coords = BG_popwt[,c("long", "lat")], data = BG_popwt, proj4string = CRS("+proj=longlat +datum=NAD83"))
+#shp_dsn <- paste("C:/Users/loneal/Desktop/BG_PopCent_DAC_ACS_spatial_", export_date, sep = "") #update with different desktop when someone else runs
+shp_dsn <- paste("C:/Users/lplummer/Desktop/BG_PopCent_DAC_ACS_spatial_", export_date, sep = "")
+layer_name <- paste("BG_PopCent_DAC_ACS_spatial_", export_date, sep = "")
+writeOGR(BG_popwt_spatial, dsn=shp_dsn, layer=layer_name, driver="ESRI Shapefile")
+
+#OPTIONAL: Census Tract process ------------------------------------------------------------------------------------------------------------------------------------------------------
+CT_popwt <-  read.delim("Census/CenPop2010_Mean_TR06.txt", header = TRUE, sep = ",", dec = ".", colClasses = "character")
+
+acs_ct <- read.csv("Population_Data/CT_ACS_data_2019-05-31.csv", colClasses = "character")
+#Turn all of the numbers into the numeric format, but keep GEOID as a character
+acs_ct[, 3:39] <- sapply(acs_ct[, 3:39], as.numeric)
+
+#CT: Label mean pop centers as DACs ----------------------------------------------------------------------------------------------------------------------------------------------------
+#Create census tract GEOID for CT mean center of pop
+CT_popwt$GEOID <- paste(CT_popwt$STATEFP, CT_popwt$COUNTYFP, CT_popwt$TRACTCE, sep="")
+CT_popwt$GEOID_ct <- substr(CT_popwt$GEOID, 2, 11) #purposely cut off the leading zero for this GEOID_ct because the CES GEOIDs do not have the leading zero
+
+#Create census tract GEOID dataframe for DACs
+dac_geoid <- data.frame(dacs$`Census Tract`)
+dac_geoid <- dac_geoid %>% 
+  rename(GEOID_ct = dacs..Census.Tract.)
+dac_geoid$GEOID_ct <- as.character(dac_geoid$GEOID_ct)
+dac_geoid$DAC <- 1
+
+#The centroids in DAC census tracts have DAC = 1
+CT_popwt <- left_join(CT_popwt, dac_geoid, "GEOID_ct")
+
+#DAC should be 0 for those centroids not in DAC census tracts
+CT_popwt$DAC <- ifelse(is.na(CT_popwt$DAC), 0, 1)
+
+#Clean out unnecessary columns
+CT_popwt <- subset(CT_popwt, select = -c(POPULATION, GEOID_ct)) #remove the pop column because this is associated with the 2010 census, and we will use the 2017 census info
+
+#CT: Join the centroids with the ACS data -------------------------------------------------------------------------------------------------------------------------------------------
+
+CT_popwt <- left_join(CT_popwt, acs_ct, "GEOID")
+
+#Rename for easier GIS use
+CT_popwt <- CT_popwt %>% 
+  rename(lat = LATITUDE) %>%
+  rename(long = LONGITUDE)
+
+#CT: Filter out the block groups with no population ------------------------------------------------------------------------------------------------------------------------------
+
+#Block groups coded as 0 are bodies of water, so we are removing these for block groups, but not applicable for CT
+
+#Remove the census tracts with no population as of the 2017 census
+CT_popwt <- subset(CT_popwt, pop_total > 0) #8057 to 8011 - remove 46
+
+#CT: Export -------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+export_date <- Sys.Date()
+
+#Updated CT csv
+export_CT_path <- paste("R_output/CT_PopCent_DAC_ACS_",export_date,".csv", sep = "")
+write.csv(CT_popwt, file=export_CT_path, row.names=FALSE)
+
+#Export shapefile
+CT_popwt$long <- as.numeric(CT_popwt$long)
+CT_popwt$lat <- as.numeric(CT_popwt$lat)
+
+CT_popwt_spatial <- SpatialPointsDataFrame(coords = CT_popwt[,c("long", "lat")], data = CT_popwt, proj4string = CRS("+proj=longlat +datum=NAD83"))
+shp_dsn <- paste("C:/Users/loneal/Desktop/CT_PopCent_DAC_ACS_spatial_", export_date, sep = "")
+layer_name <- paste("CT_PopCent_DAC_ACS_spatial_", export_date, sep = "")
+writeOGR(CT_popwt_spatial, dsn=shp_dsn, layer=layer_name, driver="ESRI Shapefile")
+```
+
+#Run spatial join (modify arcgis method)
+```{r}
+
+```
+
+#Spatial post processing 
+```{r}
+#### Analysis of Total Emissions Near a Block Group
+#Built by: Lauren O'Neal and Laurel Plummer, Last updated on: LP 10/24/19 and LO 9/23/2019
+
+# Libraries ----
+
+if(!require(pacman)){install.packages("pacman");
+  library(pacman)}
+p_load(dplyr, tidyr, ggplot2, RColorBrewer, tidyverse, writexl, readxl, broom)
+
+
+# Set up and read in the data --------------------------------------------------------------------------------------------------------------------------------------------
+###File path location for data inputs and outputs
+setwd("U:/CEERB/CHEIS/AB32_Analysis/Data/Cap_and_Trade_Analysis") 
+
+bg_data <- read_excel("GIS_output/BGplusEmissions_20191024.xlsx") %>%  #10/24 version includes corrected version of toxics
+  select(GEOID, DAC, rac_ttl:urb_CT_, include, loc_GHG, loc_CPl, loc_typ, year, pre_pst, sumGHG:nh3) %>% 
+  #LO 9/23/19 added demographics and sumGHG, loc_CoPol to loc_CPl, loc_type to loc_typ, pre_post to pre_pst
+  #LO 9/9/19 added DAC to above select and removed DAC_2_5 - DAC is about the BG whereas the DAC_2_5 is about the facility
+  #ex: a BG that is not a DAC may have a facility nearby that is also near a DAC, so DAC_2_5 could be "Yes" even if the BG in question isn't a DAC - this is confusing/misleading
+  filter(include == "yes") %>%
+  #Decision point - filter for facilties with co-located emissions data 
+  #filter(loc_CPl == 1) #LO 9/23/19 loc_CoPol to loc_CPl
+  filter(loc_CPl == 1 & loc_GHG == 1) #filter for only facilities with co-located data 
+
+bg_data_sum <- bg_data %>% 
+  group_by(GEOID, year) %>% 
+  summarize_at(vars(tog:nh3), sum, na.rm = TRUE) %>% #LO 9/9/19 added vars() around tog:nh3 because "Error in check_dot_cols(.vars, .cols) : object 'tog' not found"
+  left_join(unique(select(bg_data, c(GEOID,year,DAC,pre_pst))), by = c('GEOID', 'year')) #LO 9/9 added this line to add back the columns lost in summarize, 9/23/19 pre_post to pre_pst
+#calculate the annual emissions for all facilities within 2.5 miles of BG center
+
+#bg_data_sum$DAC_2_5 <- factor(bg_data_sum$DAC_2_5, levels = c("No","Yes")) # LO 9/9 removed, see DAC_2_5 explanation above
+bg_data_sum$DAC[bg_data_sum$DAC == 1] <- "Yes" #changing DAC column from 0/1 to yes/no
+bg_data_sum$DAC[bg_data_sum$DAC == 0] <- "No"
+bg_data_sum$DAC <- factor(bg_data_sum$DAC, levels = c("No","Yes"))
+bg_data_sum$pre_pst <- factor(bg_data_sum$pre_pst, levels = c("pre","post")) #LO 9/23/19 pre_post to pre_pst
+
+
+#example workflow -- 
+#summary tables of pm emissions before/after cap and trade in communities from all facilities within 2.5 miles from pop cent of BG
+options(scipen = 999)
+BG_DAC_prepost <- bg_data_sum %>%
+  group_by(GEOID, DAC, pre_pst) %>% #LO 9/9, DAC_2_5 to DAC, 9/23/19 pre_post to pre_pst
+  #summarize(mean_pm = mean(annual_pm)) %>% #LO 9/9, replaced with line below
+  summarize_at(vars(pm), sum, na.rm = TRUE) %>%
+  mutate(logpm = log(1+pm)) #LO 9/9, mean_pm to pm
+  
+hist(BG_DAC_prepost$pm) #LO 9/9, replaced mean_pm with pm
+hist(BG_DAC_prepost$logpm)
+
+mod <- tidy(lm(logpm ~ DAC* pre_pst, data = BG_DAC_prepost)) #LO 9/9, DAC_2_5 to DAC, 9/23/19 pre_post to pre_pst
+
+DAC_prepost <- bg_data_sum %>%
+  group_by(DAC, pre_pst) %>% #LO 9/9, DAC_2_5 to DAC, 9/23/19 pre_post to pre_pst
+  #summarize(mean_pm = mean(annual_pm)) #LO 9/9, replaced with line below
+  summarize_at(vars(pm), sum, na.rm = TRUE)
+
+plot <- ggplot(data = DAC_prepost, aes(x = DAC, y = pm, fill = pre_pst)) + #LO 9/9, DAC_2_5 to DAC, mean_pm to pm, 9/23/19 pre_post to pre_pst
+  geom_bar(stat = "identity", position=position_dodge(.9)) +
+  theme_bw() + theme(legend.position = "right") +  
+  labs(y = "Mean PM Emissions", x = element_blank()) +  
+  scale_fill_manual(values = c("gray", "black"))
+plot
+
+#modeling pm emissions before/after cap and trade with demographic predictors, LO added 9/23/19
+#DAC predictive of higher pm AFTER cap and trade than before
+BG_DAC_pre <- BG_DAC_prepost %>%
+  filter(pre_pst == "pre") %>%
+  left_join(unique(select(bg_data, c(GEOID,rac_ttl:urb_CT_))), by = c('GEOID'))
+
+m1 <- lm(pm ~ DAC + n_wht_p + NHS_pcl + pov_pcl + pp_dns_ + snsAg_p, data = BG_DAC_pre)
+summary(m1)
+
+m2 <- lm(pm ~ DAC, data = BG_DAC_pre)
+summary(m2)
+
+BG_DAC_post <- BG_DAC_prepost %>%
+  filter(pre_pst == "post") %>%
+  left_join(unique(select(bg_data, c(GEOID,rac_ttl:urb_CT_))), by = c('GEOID'))
+
+m3 <- lm(pm ~ DAC + n_wht_p + NHS_pcl + pp_dns_ + snsAg_p, data = BG_DAC_post)
+summary(m3)
+
+m4 <- lm(pm ~ DAC, data = BG_DAC_post)
+summary(m4)
+
+#modeling nox emissions before/after cap and trade with demographic predictors, LO added 9/23/19
+#DAC predictive of higher nox BEFORE cap and trade than after
+BG_DAC_prepost_nox <- bg_data_sum %>%
+  group_by(GEOID, DAC, pre_pst) %>% 
+  summarize_at(vars(nox), sum, na.rm = TRUE) %>%
+  mutate(logNox = log(1+nox)) 
+
+BG_DAC_pre_nox <- BG_DAC_prepost_nox %>%
+  filter(pre_pst == "pre") %>%
+  left_join(unique(select(bg_data, c(GEOID,rac_ttl:urb_CT_))), by = c('GEOID'))
+
+m1 <- lm(nox ~ DAC + n_wht_p + NHS_pcl + pov_pcl + pp_dns_ + snsAg_p, data = BG_DAC_pre_nox)
+summary(m1)
+
+m2 <- lm(nox ~ DAC, data = BG_DAC_pre_nox)
+summary(m2)
+
+BG_DAC_post_nox <- BG_DAC_prepost_nox %>%
+  filter(pre_pst == "post") %>%
+  left_join(unique(select(bg_data, c(GEOID,rac_ttl:urb_CT_))), by = c('GEOID'))
+
+m3 <- lm(nox ~ DAC + n_wht_p + NHS_pcl + pp_dns_ + snsAg_p, data = BG_DAC_post_nox)
+summary(m3)
+
+m4 <- lm(nox ~ DAC, data = BG_DAC_post_nox)
+summary(m4)
+
+
+```
+
+
+```
+
