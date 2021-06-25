@@ -7,6 +7,15 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+opts_knit$set(root.dir = "U:/CEERB/CHEIS/AB32_Analysis/")
+
+
+
+# Libraries and Working Directory ----------------------------------------------------------------------------------------------------------------------------------------------------------------
+library(sf)
+library(rgdal)
+library(tidyverse)
+library(readxl)
 ```
 
 ```{r}
@@ -17,31 +26,23 @@ date: "6/25/2021"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
 ```
 
+
+Join ACS and Quartile Data with Block Group Mean Centers of Population
 ```{r}
-#### Connecting Block Group Mean Centers of Population to DAC Status and ACS Data
-#Built by: Lauren O'Neal, Last updated on: 8/22/2019
 
-# Libraries and Working Directory ----------------------------------------------------------------------------------------------------------------------------------------------------------------
-library(sf)
-library(rgdal)
-library(tidyverse)
-library(readxl)
 
-###File path location for data inputs and outputs
-setwd("U:/CEERB/CHEIS/AB32_Analysis/Data/Cap_and_Trade_Analysis/")
 
 
 # Read in data ----------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+#BG mean centers of population from txt file available through the Census online https://www.census.gov/geographies/reference-files/2010/geo/2010-centers-population.html
+BG_popwt <- read.delim("Data/US_Census/Spatial_Data/CenPop2010_Mean_BG06.txt", header = TRUE, sep = ",", dec = ".", colClasses = "character")
+
+#continue revising from here
 #List of SB535 DACs from CARS
 dacs <- read_excel("OEHHA_DATA/SB535DACs_CES3_2018update.xlsx", "SB535 list (2018 update)")
-
-#BG mean centers of population from txt file available through the Census online https://www.census.gov/geographies/reference-files/2010/geo/2010-centers-population.html
-BG_popwt <- read.delim("Census/CenPop2010_Mean_BG06.txt", header = TRUE, sep = ",", dec = ".", colClasses = "character")
 
 #Output from "U:/CEERB/CHEIS/AB32_Analysis/Data/Cap_and_Trade_Analysis/R Scripts/6_Population_ACS_BG.R"
 #This is the block group file created from ACS API script
