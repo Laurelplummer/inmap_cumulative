@@ -4,99 +4,72 @@ author: "Laurel Plummer"
 date: "6/25/2021"
 output: html_document
 ---
-
+#Setup
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 opts_knit$set(root.dir = "U:/CEERB/CHEIS/AB32_Analysis/")
 
-
-
-# Libraries and Working Directory ----------------------------------------------------------------------------------------------------------------------------------------------------------------
-library(sf)
-library(rgdal)
-library(tidyverse)
-library(readxl)
-```
-
-```{r}
----
-title: "BG Cumulative Emissions"
-author: "Laurel Plummer"
-date: "6/25/2021"
-output: html_document
----
-
-```
-
-
-Join ACS and Quartile Data with Block Group Mean Centers of Population
-```{r}
-
-
-
-
-# Read in data ----------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-#BG mean centers of population from txt file available through the Census online https://www.census.gov/geographies/reference-files/2010/geo/2010-centers-population.html
-BG_popwt <- read.delim("Data/US_Census/Spatial_Data/CenPop2010_Mean_BG06.txt", header = TRUE, sep = ",", dec = ".", colClasses = "character")
-
-#continue revising from here
-#List of SB535 DACs from CARS
-dacs <- read_excel("OEHHA_DATA/SB535DACs_CES3_2018update.xlsx", "SB535 list (2018 update)")
-
-#Output from "U:/CEERB/CHEIS/AB32_Analysis/Data/Cap_and_Trade_Analysis/R Scripts/6_Population_ACS_BG.R"
-#This is the block group file created from ACS API script
-#We are not using the spatial file because we are just joining the data to the location of the centroids
-acs_bg <- read.csv("Population_Data/BG_ACS_data_2019-05-31.csv", colClasses = "character")
-
-#Turn all of the numbers into the numeric format, but keep GEOID as a character
-acs_bg[, 3:36] <- sapply(acs_bg[, 3:36], as.numeric)
-
-# Label mean pop centers as DACs ----------------------------------------------------------------------------------------------------------------------------------------------------
-
-#Create census tract GEOID for bg mean center of pop
-BG_popwt$GEOID <- paste(BG_popwt$STATEFP, BG_popwt$COUNTYFP, BG_popwt$TRACTCE, BG_popwt$BLKGRPCE, sep="")
-BG_popwt$GEOID_ct <- substr(BG_popwt$GEOID, 2, 11) #purposely cut off the leading zero for this GEOID_ct because the CES GEOIDs do not have the leading zero
-
-#Create census tract GEOID dataframe for DACs
-dac_geoid <- data.frame(dacs$`Census Tract`)
-dac_geoid <- dac_geoid %>% 
-  rename(GEOID_ct = dacs..Census.Tract.)
-dac_geoid$GEOID_ct <- as.character(dac_geoid$GEOID_ct)
-dac_geoid$DAC <- 1
-
-#The centroids in DAC census tracts have DAC = 1
-BG_popwt <- left_join(BG_popwt, dac_geoid, "GEOID_ct")
-
-#DAC should be 0 for those centroids not in DAC census tracts
-BG_popwt$DAC <- ifelse(is.na(BG_popwt$DAC), 0, 1)
-
-#Clean out unnecessary columns
-BG_popwt <- subset(BG_popwt, select = -c(POPULATION, GEOID_ct)) #remove the pop column because this is associated with the 2010 census, and we will use the 2017 census info
-
-# Join the centroids with the ACS data -------------------------------------------------------------------------------------------------------------------------------------------
-
-BG_popwt <- left_join(BG_popwt, acs_bg, "GEOID")
-
-#Rename for easier GIS use
-BG_popwt <- BG_popwt %>% 
-  rename(lat = LATITUDE) %>%
-  rename(long = LONGITUDE)
-
-# Filter out the block groups with no population ------------------------------------------------------------------------------------------------------------------------------
-
-#Block groups coded as 0 are bodies of water, so we are removing these
-BG_popwt <- subset(BG_popwt, BLKGRPCE != 0) #23212 to 23190 - remove 22 block groups
-
-#Remove the block groups with no population as of the 2017 census
-BG_popwt <- subset(BG_popwt, pop_total > 0) #23190 to 23136 - remove 54 block groups
-
-#Export -------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+#Time stamp of date exported
 export_date <- Sys.Date()
 
-#Updated BG csv
-export_BG_path <- paste("R_output/BG_PopCent_DAC_ACS_",export_date,".csv", sep = "")
-write.csv(BG_popwt, file=export_BG_path, row.names=FALSE)
+#Install and update required packages 
+if(!require(pacman)){install.packages("pacman");
+  library(pacman)}
+p_load(readxl, dplyr, tidyr, tidyverse, ggplot2, janitor, scales, wesanderson, sf, rgdal, naniar)
+
+```
+
+
+#Join ACS and Quartile Data with Block Group Mean Centers of Population
+```{r}
+# Read in data:
+
+#1. BG mean centers of population from txt file available through the Census online https://www.census.gov/geographies/reference-files/2010/geo/2010-centers-population.html
+BG_popwt <- read.delim("Data/US_Census/Spatial_Data/CenPop2010_Mean_BG06.txt", header = TRUE, sep = ",", dec = ".", colClasses = "character") %>%
+  #Create a new column 'census tract GEOID' for bg mean center of pop that is based on the three variables in the BG_popwt file. This will be used for joining later
+  mutate(GEOID_BG = paste(STATEFP, COUNTYFP, TRACTCE, BLKGRPCE, sep="")) %>%
+    mutate(GEOID = paste(STATEFP, COUNTYFP, TRACTCE, sep="")) %>%
+  mutate(GEOID_BG = as.numeric(GEOID_BG), GEOID = as.numeric(GEOID))
+
+#2. CalEnviroScreen 4 (Draft) Data with Quartiles added (Created here U:\CEERB\CHEIS\AB32_Analysis\Analysis_Cap_and_Trade\Method\OddsRatio --2_Odds Ratio Calculations)
+datCES4_wqtls <- read.csv("U:/CEERB/CHEIS/AB32_Analysis/Analysis_Cap_and_Trade/R_output/datCES4_wqtls_2021-06-28.csv")%>%
+  rename(GEOID = Tract)
+
+#3. ACS block group data 2014-2018 5 year estimates
+  #Output from "U:/CEERB/CHEIS/AB32_Analysis/Data/Cap_and_Trade_Analysis/R Scripts/6_Population_ACS.R"
+  #This is the block group file created from ACS API script for block group data 14-18
+  #We are not using the spatial file because we are just joining the data to the location of the centroids
+acs_bg <- read.csv("U:/CEERB/CHEIS/AB32_Analysis/Data/US_Census/Population_Data/BG_ACS_data_14_18_2021-06-28.csv")%>%
+  #Change the variable name to reflect that this includes the block group id
+  rename(GEOID_BG = GEOID) 
+```
+
+#Join BG with CES and ACS
+```{r}
+#Assign each block group centroid the CES percentile and quartile scores, then with the block group acs variables
+BG_CES4_ACS <- BG_popwt %>%
+  dplyr::select(GEOID, everything()) %>%
+  #remove the pop column because this is associated with the 2010 census, and we will use the 2018 census info
+  dplyr::select(-POPULATION) %>%
+  #Join with CES
+  left_join(datCES4_wqtls[, c("GEOID", "pctl_CES", "qtl_CES")], by = c("GEOID")) %>%
+  #Join with ACS by GEOID_BG
+  dplyr::select(GEOID_BG, everything()) %>%
+  left_join(acs_bg, by = c("GEOID_BG")) %>%
+  #Filter out the block groups with no population 
+  #Block groups coded as 0 are bodies of water, so we are removing these
+  filter(BLKGRPCE != 0) %>% #23212 to 23190 - remove 22 block groups
+  #Remove the block groups with no population as of the 2017 census (TO DO: Update to 2018 census)
+  filter(pop_total > 0) #23190 to 23139 - remove 51 block groups
+```
+
+
+#Export csv
+```{r}
+write.csv(BG_CES4_ACS, paste("Analysis_Cap_and_Trade/R_output/BG_CES4_ACS_", export_date, ".csv", sep = ""), row.names = FALSE) 
+
+
+
 
 #Export shapefile
 BG_popwt$long <- as.numeric(BG_popwt$long)
@@ -291,6 +264,4 @@ summary(m4)
 
 ```
 
-
-```
 
