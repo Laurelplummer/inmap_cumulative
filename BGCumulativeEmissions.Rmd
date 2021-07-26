@@ -6,70 +6,362 @@ output: html_document
 ---
 #Setup
 ```{r setup, include=FALSE}
+#Install and update required packages 
+if(!require(pacman)){install.packages("pacman");
+  library(pacman)}
+p_load(knitr, readxl, dplyr, tidyr, tidyverse, ggplot2, janitor, scales, wesanderson, sf, naniar)
+
 knitr::opts_chunk$set(echo = TRUE)
 opts_knit$set(root.dir = "U:/CEERB/CHEIS/AB32_Analysis/")
 
 #Time stamp of date exported
 export_date <- Sys.Date()
 
-#Install and update required packages 
-if(!require(pacman)){install.packages("pacman");
-  library(pacman)}
-p_load(readxl, dplyr, tidyr, tidyverse, ggplot2, janitor, scales, wesanderson, sf, rgdal, naniar)
+outputPath <- "Analysis_Cap_and_Trade/R_output/bg_cumulative/" #Directory where you want your results saved. Make sure there's a slash at the end
+```
 
+#Read in stack data and convert each to sf object/shapefile
+##2012 Stack Data
+```{r}
+#Read in csv of 2012 Stack Data
+stk2012 <-read.csv(file = "U:/CEERB/CHEIS/AB32_Analysis/Data/CARB_CEIDARS_StackEmissionsData/CEIDARS_2020_12_17/CEIDARS_Clean/stk12_FULL_0308.csv") %>% #8226 obs
+  #filter out NAs
+  filter(!is.na(SLON_NAD83)) #6793 obs
+
+#Data cleaning for 2012 stack emissions data
+stk2012_clean <- stk2012 %>% 
+    #Data cleaning for stack height (STKHT): Change NAs and zeros to 121.4 ft for non-ground stacks (ground - STK = 9999)
+  rename(STKHT_original = STKHT) %>% #change STKHT->STKHT_original to save raw data
+  mutate(STKHT = ifelse(STKHT_original == 0, 121.4,
+                #If original stack height is NA and stack id is NOT 9999, then 121.4
+                  ifelse(is.na(STKHT_original) & STK != 9999, 121.4, 
+                      ifelse(is.na(STKHT_original) & STK == 9999, 0,
+                          STKHT_original)))) %>%
+  #Data cleaning: Convert from feet to meters by dividing by 3.2808 before separating to height layers
+  mutate(STKHT = STKHT/3.2808) %>%
+  #Data cleaning: Create new column with height layer – Layer1, Layer2, Layer3, Layer2_3. OR divide into 4 separate data frames. Layers (L1: <57m, L2: >=57 and <140m, L3: >=760m, in between L2 and L3: >=140 and <760 m)
+  mutate(HTLAYER = ifelse(STKHT < 57, "L1", #0-57m
+                          ifelse(STKHT >=57 & STKHT <140, "L2",#57-140 meters, 
+                                 ifelse(STKHT >=760, "L3", #and above 760 meters
+                                        ifelse(STKHT >=140 & STKHT <760, "L2_3",
+                                               NA))))) %>%
+  select(arbid_facid, STK, STKNAME, STKHT, HTLAYER, SLAT_NAD83, SLON_NAD83, PM2.5:NH3)
+
+#Convert to sf
+sf_stk2012 <- st_as_sf(stk2012_clean, coords = c("SLAT_NAD83", "SLON_NAD83"), crs = 3310)
+
+#Remove old files to save space
+rm(stk2012)
+rm(stk2012_clean)
+
+plot(sf_stk2012)
+
+```
+ 
+##2017 Stack Data
+```{r}
+#Read in csv of 2017 Stack Data 
+stk2017 <-read.csv(file = "U:/CEERB/CHEIS/AB32_Analysis/Data/CARB_CEIDARS_StackEmissionsData/CEIDARS_2020_12_17/CEIDARS_Clean/stk17_FULL_0308.csv") %>% #7754 obs
+  #filter out NAs
+  filter(!is.na(SLON_NAD83)) #6326 obs
+
+#Data cleaning (check ISRM function file on github)
+  #1. Change NAs and zero’s for height to 121.4 feet.  
+stk2017_clean<- stk2017 %>% 
+  rename(STKHT_original = STKHT) %>%
+  mutate(STKHT = ifelse(STKHT_original == 0, 121.4,
+                  ifelse(is.na(STKHT_original) & STK != 9999, 121.4,
+                      ifelse(is.na(STKHT_original) & STK == 9999, 0,
+                          STKHT_original)))) %>%
+  #Convert from feet to meters by dividing by 3.2808 before separating to height layers
+  mutate(STKHT = STKHT/3.2808) %>%
+  #2. Create new column with height layer – Layer1, Layer2, Layer3, Layer2_3. OR divide into 4 separate data frames. Layers (L1: <57m, L2: >=57 and <140m, L3: >=760m, in between L2 and L3: >=140 and <760 m)
+  mutate(HTLAYER = ifelse(STKHT < 57, "L1", #0-57m
+                          ifelse(STKHT >=57 & STKHT <140, "L2",#57-140 meters, 
+                                 ifelse(STKHT >=760, "L3", #and above 760 meters
+                                        ifelse(STKHT >=140 & STKHT <760, "L2_3",
+                                               NA))))) 
+
+#Convert to sf
+sf_stk2017 <- st_as_sf(stk2017_clean, coords = c("SLAT_NAD83", "SLON_NAD83"), crs = 3310)
+
+rm(stk2017)
+rm(stk2017_clean)
+```
+ 
+#Read in block group (bg) mean centers of population from txt file available through the Census online here: https://www.census.gov/geographies/reference-files/2010/geo/2010-centers-population.html
+```{r}
+bg_popwt <- read.delim("Data/US_Census/Spatial_Data/CenPop2010_Mean_BG06.txt", header = TRUE, sep = ",", dec = ".", colClasses = c(rep("character", 5), "numeric", "numeric")) %>%
+  clean_names() %>%
+  #Create a new column 'census tract GEOID' for bg mean center of pop that is based on the three variables in the BG_popwt file. This will be used for joining later
+    mutate(geoid_bg = paste(statefp, countyfp, tractce, blkgrpce, sep="")) %>%
+    mutate(geoid = paste(statefp, countyfp, tractce, sep="")) %>%
+    mutate(geoid_bg = as.numeric(geoid_bg), geoid = as.numeric(geoid)) %>%
+  select(geoid_bg, everything())
+
+#Convert to sf
+sf_bg_popwt <- st_as_sf(bg_popwt, coords = c("latitude", "longitude"), crs = 3310)
+
+#Remove the csv of block group points  
+rm(bg_popwt)
+```
+
+#Create buffer polygons for 2.5 miles Block Group Population Weighted Centroids which will represent the block groups
+```{r}
+sf_bg_2.5miles <- st_buffer(sf_bg_popwt, 4023.36) #4023.36 is 2.5 miles in meters
+
+#Remove the sf of block group points  
+rm(sf_bg_popwt)
+```
+
+ 
+ 
+```{r}
+# Function to separate emissions by height into the 3 layers of the ISRM and emissions in between layers 2 and 3
+emisByHeight <- function(sf_stk2017){
+  
+  L1 <- sf_stk2017 %>%
+    filter(STKHT < 57)
+  
+  L2 <- sf_stk2017 %>%
+    filter(STKHT >= 57 & STKHT < 140)
+  
+  L3 <- sf_stk2017 %>%
+    filter(STKHT >=760)
+  
+  L2_3 <- sf_stk2017 %>%
+    filter(STKHT >= 140 & STKHT < 760)
+  
+  emisList <- list(L1,L2,L3,L2_3)
+  
+  return(emisList)
+  
+}
+```
+ 
+```{r}
+# Specify conversion multiplier. This is the multiplier to convert tons/year to ug/s
+conv_mult = (2000 * 453.592 * 10**6) / (525600 * 60)
+```
+
+ 
+```{r}
+# Function to sum emissions per block group buffer, join with entire InMAP grid, fill in missing values, and convert units to micrograms/second
+emisPerbuffer <- function(df, conv_mult){
+  
+  # Create dataframe of zero's to hold receptor conc and source contribution by cell
+  mat <- matrix(0, ncol = 12, nrow = 21705)
+  colnames(mat) <- c("PrimaryPM25_rec","SOA_rec","pNH4_rec","pNO3_rec","pSO4_rec","PrimaryPM25_src","SOA_src","pNH4_src","pNO3_src","pSO4_src","TotPM_rec","TotPM_src")
+  
+  
+  if(any(df$STKHT >= 140 & df$STKHT < 760)){
+    df %<>%
+      group_by(geoid_bg, STKHT) %>%
+      summarise(PM2_5 = sum(PM2_5),
+                NOx = sum(NOx),
+                SOx = sum(SOx),
+                VOC = sum(VOC),
+                NH3 = sum(NH3)) %>%
+      ungroup()
+    
+  } else {
+    df %<>%
+      group_by(geoid_bg) %>%
+      summarise(PM2_5 = sum(PM2_5),
+                NOx = sum(NOx),
+                SOx = sum(SOx),
+                VOC = sum(VOC),
+                NH3 = sum(NH3)) %>%
+      ungroup()
+  }
+  
+  df %<>%
+    st_set_geometry(NULL) %>%
+    right_join(bg_buffer, by = "geoid_bg", all = TRUE) %>%
+    mutate(PM2_5 = ifelse(is.na(PM2_5), 0, PM2_5 * conv_mult)) %>%
+    mutate(NOx = ifelse(is.na(NOx), 0, NOx * conv_mult)) %>%
+    mutate(SOx = ifelse(is.na(SOx), 0, SOx * conv_mult)) %>%
+    mutate(VOC = ifelse(is.na(VOC), 0, VOC * conv_mult)) %>%
+    mutate(NH3 = ifelse(is.na(NH3), 0, NH3 * conv_mult)) %>%
+    select(-geometry) %>%
+    arrange(geoid_bg) %>%
+    cbind(mat) %>%
+    as.matrix()
+  
+  return(df)
+}
+```
+ 
+ 
+```{r}
+# Join wrapper function
+# Spatial join of emissions to block group buffers. Then run through the emisByHeight(), ?emisPerGrid(), and ?getSRconc() functions.
+# Split results from ground-level, stack, and total emissions.
+# Join with InMAP grid again to get spatial information, change colname to be <10 char, and return as a list of 3 sf objects.
+
+
+joinWrapper <- function(emis,bg_buffer,conv_mult){
+  #isrm <- nc_open(isrmPath)
+  
+  # Change CRS if emis does not have the same crs as inmapGrid
+  if(st_crs(emis) != st_crs(bg_buffer)){
+    emis %<>%
+      st_transform(st_crs(bg_buffer))
+  }
+  
+  stopifnot(st_crs(emis) == st_crs(bg_buffer))
+  
+  emisMat <- st_join(emis,bg_buffer) %>%
+    emisByHeight() %>%
+    lapply(. %>% (function (x) emisPerbuffer(x,conv_mult)))
+  
+  results <- imap(emisMat, function(x,y) getSRconc(emis = x, idx = y, isrm = isrm, isrmPol = isrmPol, emisPol = emisPol))
+  
+}
+  #nc_close(isrm)
+```
+
+```{r}
+
+### USER INPUT - Set run options ##############################################
+
+# Specify file paths
+#inmapGridPath <- "U:/CEERB/CHEIS/AB32_Analysis/Modeling/InMAP/Chambliss_Deliverables_v1_09182020/Data Deliverables/InMAP_shapefile/InMAP_gridCells.shp"
+#isrmPath <- "C:/Users/AChen/OneDrive - California OEHHA/InMAP/RawData/ca_isrm.nc4"
+#emisPath <- "U:/CEERB/CHEIS/AB32_Analysis/Data/CARB_CEIDARS_StackEmissionsData/CEIDARS_2020_12_17/CEIDARS_Clean/stk17_FILTER_0308/stk17_FILTER_inmap.shp"
+#outputPath <- "U:/CEERB/CHEIS/AB32_Analysis/Analysis_Cap_and_Trade/R_output/ISRM/stk17_FILTER/" #Directory where you want your results saved. Make sure there's a slash at the end
+
+
+# Specify if you want results for each individual sector (TRUE) or in aggregate (FALSE). For analysis of emissions in aggregate, concentrations from ground-level, stack, and total emissions will be exported separately. For sector-level results, only the concentrations from total emissions for that sector will be exported.
+sectorDetail <- FALSE
+
+# Specify conversion multiplier. This is the multiplier to convert tons/year to ug/s
+conv_mult = (2000 * 453.592 * 10**6) / (525600 * 60)
+
+# Specify names of pollutants in emissions data and matching names in ISRM
+emisPol <- c("PM2.5","VOC","NH3","NOx","SOx")
+#isrmPol <- c("PrimaryPM25","SOA","pNH4","pNO3","pSO4")
+
+### END OF USER INPUT #########################################################
+ # Read in data
+
+emis <- sf_stk2012
+bg_buffer <- sf_bg_2.5miles
+
+# Run through ISRM functions and export shapefiles
+if(sectorDetail == FALSE){
+  results <- joinWrapper(emis,bg_buffer,conv_mult)
+  
+  # Export individual shapefiles for concentrations due to ground-level,stack, and total emissions
+  for(i in 1:length(results)){
+    st_write(results[[i]], paste0(outputPath,basename(outputPath),"_",names(results)[i],".shp"), driver = "ESRI shapefile")
+  }
+} else {
+  # Split emissions by sector
+  emisBySector <- split(emis, f = emis$sector)
+  
+  # Run ISRM wrapper function for each sector's set of emissions
+  sectorResults <- lapply(emisBySector, function(x) isrmWrapper(emis = x, inmapGrid,conv_mult,isrmPath))
+  
+  # Get concentrations from total emissions for each sector
+  sectorResultsTot <- lapply(sectorResults, function(x) return(x$total))
+  
+  # Add sector name as a new column
+  sectorResultsTot <- imap(sectorResultsTot, function(x,y) addSectorName(emis = x, idx = y))
+  
+  # Export shapefiles for each sector
+  for(i in 1:length(sectorResultsTot)){
+    sectors <- names(sectorResultsTot)
+    
+    # remove spaces in sector names
+    sectors <- gsub("[[:space:]]","",sectors)
+    
+    st_write(sectorResultsTot[[i]], paste0(outputPath,basename(outputPath),"_",sectors[i],"_total.shp"), driver = "ESRI shapefile")
+  }
+  
+}
+
+```
+
+
+
+
+
+#Read in US Census Block Group Polygon Boundaries https://cengel.github.io/R-spatial/spatialops.html
+```{r}
+BG_polygon_main <- st_read("U:/CEERB/CHEIS/AB32_Analysis/Data/US_Census/Spatial_Data/tl_2010_06_bg10/tl_2010_06_bg10.shp") 
+
+sf_BG_polygon <- BG_polygon_main %>%
+  select(GEOID10, everything()) %>%
+  mutate(GEOID10 = as.numeric(GEOID10)) %>%
+  rename(geoid_bg = GEOID10)
 ```
 
 
 #Join ACS and Quartile Data with Block Group Mean Centers of Population
 ```{r}
-# Read in data:
-
-#1. BG mean centers of population from txt file available through the Census online https://www.census.gov/geographies/reference-files/2010/geo/2010-centers-population.html
-BG_popwt <- read.delim("Data/US_Census/Spatial_Data/CenPop2010_Mean_BG06.txt", header = TRUE, sep = ",", dec = ".", colClasses = "character") %>%
-  #Create a new column 'census tract GEOID' for bg mean center of pop that is based on the three variables in the BG_popwt file. This will be used for joining later
-  mutate(GEOID_BG = paste(STATEFP, COUNTYFP, TRACTCE, BLKGRPCE, sep="")) %>%
-    mutate(GEOID = paste(STATEFP, COUNTYFP, TRACTCE, sep="")) %>%
-  mutate(GEOID_BG = as.numeric(GEOID_BG), GEOID = as.numeric(GEOID))
 
 #2. CalEnviroScreen 4 (Draft) Data with Quartiles added (Created here U:\CEERB\CHEIS\AB32_Analysis\Analysis_Cap_and_Trade\Method\OddsRatio --2_Odds Ratio Calculations)
 datCES4_wqtls <- read.csv("U:/CEERB/CHEIS/AB32_Analysis/Analysis_Cap_and_Trade/R_output/datCES4_wqtls_2021-06-28.csv")%>%
-  rename(GEOID = Tract)
+  rename(geoid = Tract)
 
 #3. ACS block group data 2014-2018 5 year estimates
   #Output from "U:/CEERB/CHEIS/AB32_Analysis/Data/Cap_and_Trade_Analysis/R Scripts/6_Population_ACS.R"
   #This is the block group file created from ACS API script for block group data 14-18
   #We are not using the spatial file because we are just joining the data to the location of the centroids
-acs_bg <- read.csv("U:/CEERB/CHEIS/AB32_Analysis/Data/US_Census/Population_Data/BG_ACS_data_14_18_2021-06-28.csv")%>%
+acs_bg <- read.csv("U:/CEERB/CHEIS/AB32_Analysis/Data/US_Census/Population_Data/BG_ACS_data_14_18_2021-06-28.csv") %>%
   #Change the variable name to reflect that this includes the block group id
-  rename(GEOID_BG = GEOID) 
+  rename(geoid_bg = GEOID) 
 ```
 
 #Join BG with CES and ACS
 ```{r}
 #Assign each block group centroid the CES percentile and quartile scores, then with the block group acs variables
 BG_CES4_ACS <- BG_popwt %>%
-  dplyr::select(GEOID, everything()) %>%
+  dplyr::select(geoid, everything()) %>%
   #remove the pop column because this is associated with the 2010 census, and we will use the 2018 census info
-  dplyr::select(-POPULATION) %>%
+  dplyr::select(-population) %>%
   #Join with CES
-  left_join(datCES4_wqtls[, c("GEOID", "pctl_CES", "qtl_CES")], by = c("GEOID")) %>%
+  left_join(datCES4_wqtls[, c("geoid", "pctl_CES", "qtl_CES")], by = c("geoid")) %>%
   #Join with ACS by GEOID_BG
-  dplyr::select(GEOID_BG, everything()) %>%
-  left_join(acs_bg, by = c("GEOID_BG")) %>%
+  dplyr::select(geoid_bg, everything()) %>%
+  left_join(acs_bg, by = c("geoid_bg")) %>%
   #Filter out the block groups with no population 
   #Block groups coded as 0 are bodies of water, so we are removing these
-  filter(BLKGRPCE != 0) %>% #23212 to 23190 - remove 22 block groups
+  filter(blkgrpce != 0) %>% #23212 to 23190 - remove 22 block groups
   #Remove the block groups with no population as of the 2017 census (TO DO: Update to 2018 census)
   filter(pop_total > 0) #23190 to 23139 - remove 51 block groups
 ```
 
-
-#Export csv
+##Export csv of BG centroids with CES and ACS joined
 ```{r}
-write.csv(BG_CES4_ACS, paste("Analysis_Cap_and_Trade/R_output/BG_CES4_ACS_", export_date, ".csv", sep = ""), row.names = FALSE) 
+#write.csv(BG_CES4_ACS, paste("Analysis_Cap_and_Trade/R_output/BG_CES4_ACS_", export_date, ".csv", sep = ""), row.names = FALSE) 
+```
 
 
 
+
+#Some draft code for plotting
+https://ggplot2.tidyverse.org/reference/ggsf.html
+```{r}
+#check the class before mapping to make sure its sf and didn't convert back to a df
+#comment out each one to see if they show up individually
+fig <- ggplot() +
+  geom_sf(data = sf_BGbuffer2.5miles,fill = NA) +
+  geom_sf(data = sf_stk2017, fill = NA) +
+  #coord_sf(xlim = c(-1875000,-1864000), ylim = c(-613000,-598000)) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1))
+fig
+
+ggsave(file = "U:/CEERB/AB617_Shared/Output/Figures/InMAPgrid_Portside.pdf",plot = fig,width = 6, height = 4.5)
+```
+
+
+
+
+
+#OLD CODE
+```{r}
 
 #Export shapefile
 BG_popwt$long <- as.numeric(BG_popwt$long)
@@ -142,10 +434,6 @@ layer_name <- paste("CT_PopCent_DAC_ACS_spatial_", export_date, sep = "")
 writeOGR(CT_popwt_spatial, dsn=shp_dsn, layer=layer_name, driver="ESRI Shapefile")
 ```
 
-#Run spatial join (modify arcgis method)
-```{r}
-
-```
 
 #Spatial post processing 
 ```{r}
